@@ -18,11 +18,6 @@ jobs:
     name: Validate site
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      TMPDIR: ${{ runner.temp }}/wiki-site
-      TMP: ${{ runner.temp }}/wiki-site
-      TEMP: ${{ runner.temp }}/wiki-site
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wiki-site/pycache
     steps:
       - name: Prepare disk-backed scratch storage
         run: |
@@ -30,14 +25,46 @@ jobs:
           case "$(findmnt -n -o FSTYPE -T "$RUNNER_TEMP")" in
             tmpfs|ramfs|devtmpfs) exit 1 ;;
           esac
+          export TMPDIR="$RUNNER_TEMP/wiki-site"
+          export TMP="$TMPDIR" TEMP="$TMPDIR"
           mkdir -p "$TMPDIR"
+          printf '%s\n' "TMPDIR=$TMPDIR" "TMP=$TMP" "TEMP=$TEMP" >> "$GITHUB_ENV"
           findmnt -T "$TMPDIR"
           df -h "$TMPDIR"
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Test site checks
-        run: python3 -m unittest discover -s tests -v
-      - name: Validate deployable files
-        run: python3 tools/check_site.py site --repository .
+      - name: Validate static files
+        run: |
+          set -euo pipefail
+          test -s site/index.html
+          test -s site/site.css
+          git ls-tree -rzt --long HEAD > "$TMPDIR/tree"
+          entries=0 total=0 files=0 site_bytes=0
+          while IFS= read -r -d '' entry; do
+            metadata=${entry%%$'\t'*}
+            path=${entry#*$'\t'}
+            read -r mode kind object bytes <<< "$metadata"
+            entries=$((entries + 1))
+            (( entries <= 2047 ))
+            [[ "$path" != *\\* ]]
+            [[ "${path##*/}" != .gitattributes ]]
+            if [[ "$kind" == tree ]]; then continue; fi
+            [[ "$kind" == blob && "$mode" == 100644 || "$kind" == blob && "$mode" == 100755 ]]
+            (( bytes <= 8 * 1024 * 1024 ))
+            total=$((total + bytes))
+            (( total <= 64 * 1024 * 1024 ))
+            if [[ "$path" != site/* ]]; then continue; fi
+            relative=${path#site/}
+            [[ ${#relative} -le 240 && "$relative" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]]
+            [[ "/$relative" != */.* ]]
+            [[ -f "$path" && ! -L "$path" ]]
+            files=$((files + 1))
+            site_bytes=$((site_bytes + bytes))
+            (( files <= 1000 && site_bytes <= 50 * 1024 * 1024 ))
+          done < "$TMPDIR/tree"
+          (( files >= 2 ))
+          git archive --format=tar.gz HEAD > "$TMPDIR/source.tar.gz"
+          (( $(stat -c %s "$TMPDIR/source.tar.gz") <= 16 * 1024 * 1024 ))
+          printf 'Validated %s static files (%s bytes)\n' "$files" "$site_bytes"
