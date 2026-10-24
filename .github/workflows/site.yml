@@ -1,0 +1,43 @@
+name: Site
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Validate site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TMPDIR: ${{ runner.temp }}/wiki-site
+      TMP: ${{ runner.temp }}/wiki-site
+      TEMP: ${{ runner.temp }}/wiki-site
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/wiki-site/pycache
+    steps:
+      - name: Prepare disk-backed scratch storage
+        run: |
+          set -euo pipefail
+          case "$(findmnt -n -o FSTYPE -T "$RUNNER_TEMP")" in
+            tmpfs|ramfs|devtmpfs) exit 1 ;;
+          esac
+          mkdir -p "$TMPDIR"
+          findmnt -T "$TMPDIR"
+          df -h "$TMPDIR"
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Test site checks
+        run: python3 -m unittest discover -s tests -v
+      - name: Validate deployable files
+        run: python3 tools/check_site.py site --repository .
